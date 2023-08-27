@@ -1,0 +1,405 @@
+---
+title: "analyzeGainAdapt"
+output: html_document
+date: "2023-06-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(RcppSimdJson)
+library(dplyr)
+library(plyr)
+library(ggplot2)
+library(cowplot)
+library(zoo)
+library(lmerTest)
+library(effsize)
+```
+
+```{r}
+save_figs = T
+adapt_trials = rep(2:13, 24) + sort(rep(0:23*20, 12))
+test_trials = rep(15:20, 24) + sort(rep(0:23*20, 6))
+trials = sort(c(adapt_trials, test_trials))
+numtrials = length(trials)
+numsubs = 10
+
+sub = vector(length = numsubs * numtrials)
+trial = vector(length = numsubs * numtrials)
+trial_id = vector(length = numsubs * numtrials) # 1-4
+phase = vector(length = numsubs * numtrials) #adapt or test
+target_angle = vector(length = numsubs * numtrials)
+ep_angle = vector(length = numsubs * numtrials)
+ep_dist = vector(length = numsubs * numtrials)
+too_late = vector(length = numsubs * numtrials)
+too_slow = vector(length = numsubs * numtrials)
+hit = vector(length = numsubs * numtrials)
+rt = vector(length = numsubs*numtrials)
+mt = vector(length = numsubs * numtrials)
+vis_dist = vector(length = numsubs * numtrials)
+move_dist = vector(length = numsubs * numtrials)
+extent = vector(length = numsubs * numtrials)
+
+
+c = 1
+for(s in 1:numsubs){
+  df = fload(paste0("GainAdaptSub", sprintf("%03d", s), ".json.gz"))
+    for(tt in trials){
+      sub[c] = s
+      trial[c] = tt
+      trial_id[c] = df$trials$trial_id[tt]
+      phase[c] = ifelse(tt %in% adapt_trials, "adapt", "test")
+      target_angle[c] = df$trials$target$angle[tt]
+      move_dist[c] = df$trials$move_dist[tt]
+      vis_dist[c] = df$trials$vis_dist[tt]
+      true_move_dist = 0
+      temp_x = df$trials$frames$input_events[[tt]]$x
+      temp_x = temp_x[df$trials$frames$start_state[[tt]] == 2] #only the reach
+      temp_x[lengths(temp_x) == 0] = NA #a bit sloppy; removes some data, but not much
+      temp_x = unlist(temp_x)
+      temp_y = df$trials$frames$input_events[[tt]]$y
+      temp_y = temp_y[df$trials$frames$start_state[[tt]] == 2] #only the reach
+      temp_y[lengths(temp_y) == 0] = NA
+      temp_y = unlist(temp_y)
+      temp_x = temp_x[!is.na(temp_x)]
+      temp_y = temp_y[!is.na(temp_y)]
+      if(length(temp_x) == 0){
+        ep_angle[c] = NA
+        extent[c] = NA
+        ep_dist[c] = NA
+      } else{
+        #rotate
+        rot_x = cos(-pi/180 * target_angle[c])*temp_x - sin(-pi/180 * target_angle[c])*temp_y
+        rot_y = sin(-pi/180 * target_angle[c])*temp_x + cos(-pi/180 * target_angle[c])*temp_y
+        ep_angle[c] = 180/pi * atan(rot_y[length(rot_y)]/rot_x[length(rot_x)]) 
+        extent[c] = sqrt(rot_y[length(rot_y)]^2 + rot_x[length(rot_x)]^2)
+        ep_dist[c] = sqrt((move_dist[c] - rot_x[length(rot_x)])^2 + rot_y[length(rot_y)]^2) #physical error
+      }
+      rt[c] = df$trials$score_data$reaction_time[tt]
+      mt[c] = df$trials$score_data$movement_time[tt]
+      too_slow[c] = df$trials$too_slow[tt]
+      hit[c] = as.numeric(df$trials$score_data$hit[tt])
+      c = c+1
+    }
+}
+
+dat = data.frame(sub, trial, trial_id, phase, target_angle, ep_angle, ep_dist, rt, mt, too_slow, hit, move_dist, vis_dist, extent)
+dat = subset(dat, dat$trial>0)
+```
+
+
+First things first: lets look at a basic learning curve
+```{r}
+#train = subset(dat, dat$phase == "adapt")
+lcs = ddply(dat, .(trial), summarise,
+            ha = mean(ep_angle, na.rm = T),
+            err = mean(ep_dist, na.rm = T),
+            mt.m = mean(mt, na.rm = T))
+lcs$acc = lcs$mt.m * lcs$err
+
+ggplot(data = lcs, aes(x = trial, y = ha)) + geom_point() + geom_vline(xintercept = 1+0:23*20, linetype = "dashed")
+ggplot(data = lcs, aes(x = trial, y = err)) + geom_point()+ geom_vline(xintercept = 1+0:23*20, linetype = "dashed")
+ggplot(data = lcs, aes(x = trial, y = mt.m)) + geom_point()+ geom_vline(xintercept = 1+0:23*20, linetype = "dashed")
+ggplot(data = lcs, aes(x = trial, y = acc)) + geom_point()+ geom_vline(xintercept = 1+0:23*20, linetype = "dashed")
+```
+Main analysis
+
+```{r}
+test = subset(dat, dat$phase == "test")
+#test$mt[test$mt>1] = NA
+
+for(s in unique(test$sub)){
+  test$z_mt[test$sub == s] = (test$mt[test$sub == s]-mean(test$mt[test$sub==s], na.rm = T))/sd(test$mt[test$sub == s], na.rm = T)
+}
+
+type_sub = ddply(test, .(sub, trial_id), summarise,
+                 mt.m = mean(mt, na.rm = T),
+                 err = mean(ep_dist, na.rm = T),
+                 move_dist = mean(move_dist, na.rm = T),
+                 ep_var = sd(ep_angle, na.rm = T),
+                 vis_dist = mean(vis_dist, na.rm = T),
+                 md = mean(log(extent), na.rm = T))
+
+type_group = ddply(type_sub, .(trial_id, move_dist, vis_dist), summarise,
+                   mt = mean(mt.m, na.rm = T),
+                   mt.se = sd(mt.m, na.rm = T)/sqrt(length(mt.m)),
+                   dist = mean(md, na.rm = T),
+                   dist.se = sd(md, na.rm = T)/sqrt(length(mt.m)))
+
+ggplot(type_group, aes(x = vis_dist, y = mt, group = move_dist, color = move_dist)) + geom_point(size = 3) + geom_errorbar(width = 0, size = 2, aes(ymin = mt - mt.se, ymax = mt + mt.se))
+
+
+ggplot(type_group, aes(x = dist, y = mt, group = vis_dist, color = vis_dist)) + geom_point(size = 3)+ geom_errorbar(width = 0, size = 2, aes(ymin = mt - mt.se, ymax = mt + mt.se)) + geom_errorbar(width = 0, size = 2, aes(xmin = dist - dist.se, xmax = dist + dist.se))
+
+ggplot(type_group, aes(x = vis_dist, y = dist, group = move_dist, color = move_dist)) + geom_point(size = 3)+ geom_errorbar(width = 0, size = 2, aes(ymin = dist - dist.se, ymax = dist + dist.se))
+
+
+ggplot(type_group, aes(x = move_dist, y = dist, group = vis_dist, color = vis_dist)) + geom_point(size = 3)+ geom_errorbar(width = 0, size = 2, aes(ymin = dist - dist.se, ymax = dist + dist.se))
+
+#linear mixed model as anova
+mt_fit = lmer(mt.m ~ md + vis_dist + (1|sub), data = type_sub)
+summary(mt_fit)
+anova(mt_fit)
+
+if(save_figs){
+  write.csv(type_sub, "E1_MTs.csv")
+}
+```
+Learning blocks
+```{r}
+#remember, trial id is the trial type
+# 1 = normal short
+# 2 = normal long
+# 3 = vis short, move long
+# 4 = vis long, move short
+train = subset(dat, dat$phase == "adapt")
+train$ti = (train$trial-2)%%20 #trial index within a block
+
+sub_lc = ddply(train, .(sub, trial_id, ti), summarise,
+                 mt= mean(mt, na.rm = T),
+                 err = mean(ep_dist, na.rm = T),
+                 extent_err = mean((extent-move_dist)/move_dist, na.rm = T))
+
+block_lc = ddply(sub_lc, .(ti, trial_id), summarise,
+                 mt.m = mean(mt, na.rm = T),
+                 mt.se = sd(mt, na.rm = T)/sqrt(length(mt)),
+                 err.m = mean(err, na.rm = T),
+                 err.se = sd(err, na.rm = T)/sqrt(length(err)),
+                 err_e.m = mean(extent_err, na.rm = T),
+                 err_e.se = sd(extent_err, na.rm = T)/sqrt(length(extent_err)))
+
+#last trial of the training blocks
+last_trial = subset(sub_lc, sub_lc$ti == 11)
+
+ggplot(data = block_lc, aes(x = ti, y = mt.m, group = as.factor(trial_id), color = as.factor(trial_id), fill = as.factor(trial_id))) + geom_point() + geom_ribbon(aes(ymin = mt.m - mt.se, ymax = mt.m+mt.se), alpha = 0.5, color = NA)
+
+ggplot(data = block_lc, aes(x = ti, y = err.m, group = as.factor(trial_id), color = as.factor(trial_id), fill = as.factor(trial_id))) + geom_point() + geom_ribbon(aes(ymin = err.m - err.se, ymax = err.m+err.se), alpha = 0.5, color = NA)
+
+ggplot(data = block_lc, aes(x = ti, y = err_e.m, group = as.factor(trial_id), color = as.factor(trial_id), fill = as.factor(trial_id))) + geom_point() + geom_ribbon(aes(ymin = err_e.m - err_e.se, ymax = err_e.m+err_e.se), alpha = 0.5, color = NA)
+
+#success rates
+sub_hit = ddply(train, .(sub, trial_id), summarise,
+                hit = mean(hit))
+group_hit = ddply(sub_hit, .(trial_id), summarise,
+                  hit.m = mean(hit),
+                  hit.se = sd(hit)/sqrt(10))
+ggplot(data = group_hit, aes(x = trial_id, y = hit.m, group = as.factor(trial_id), color = as.factor(trial_id))) + geom_point(size = 3) + geom_errorbar(aes(ymin = hit.m - hit.se, ymax = hit.m + hit.se), width = 0, size = 2) 
+
+if(save_figs){
+  write.csv(sub_hit, "E1_hit_train.csv")
+  write.csv(sub_lc, "E1_lc_train.csv")
+}
+
+```
+
+Modeling!
+```{r}
+numtrials = length(test_trials)
+
+mdFitts = function(params, df){
+  a = params[1]
+  b = params[2]
+  pred_mt = a + b*log(df$extent)
+  sse = sum((pred_mt-df$mt)^2, na.rm = T)
+  return(sse)
+}
+diffFitts = function(params, df){
+  a = params[1]
+  b = params[2]
+  gain = df$vis_dist/df$move_dist
+  pred_mt = a + b*log(df$extent * gain)
+  sse = sum((pred_mt-df$mt)^2, na.rm = T)
+  return(sse)
+}
+
+vdFitts = function(params, df){
+  a = params[1]
+  b = params[2]
+  pred_mt = a + b*log(df$vis_dist)
+  sse = sum((pred_mt-df$mt)^2, na.rm = T)
+  return(sse)
+}
+
+#three params
+avgFitts = function(params, df){
+  a = params[1]
+  b = params[2]
+  m = params[3]
+  d = m*df$extent + (1-m)*df$vis_dist
+  pred_mt = a + b*log(d)
+  sse = sum((pred_mt-df$mt)^2, na.rm = T)
+  return(sse)
+}
+diff2Fitts = function(params, df){
+  a = params[1]
+  b = params[2]
+  m = params[3]
+  gain = df$vis_dist/df$move_dist
+  w_eff = m/gain + (1-m)
+  pred_mt = a + b*log(df$extent/w_eff)
+  sse = sum((pred_mt-df$mt)^2, na.rm = T)
+  return(sse)
+}
+
+fullFitts = function(params, df){
+  a = params[1]
+  b = params[2]
+  c = params[3]
+  m = params[4]
+  gain = df$vis_dist/df$move_dist
+  w_eff = m/gain + (1-m)
+  d_eff = c*df$extent + (1-c)*df$vis_dist
+  pred_mt = a + b*log(d_eff/w_eff)
+  sse = sum((pred_mt-df$mt)^2, na.rm = T)
+  return(sse)
+}
+
+md_a = vector(length = numsubs)
+md_b = vector(length = numsubs)
+md_r = vector(length = numsubs)
+md_bic = vector(length = numsubs)
+diff_a = vector(length = numsubs)
+diff_b = vector(length = numsubs)
+diff_r = vector(length = numsubs)
+diff_bic = vector(length = numsubs)
+vd_a = vector(length = numsubs)
+vd_b = vector(length = numsubs)
+vd_r = vector(length = numsubs)
+vd_bic = vector(length = numsubs)
+
+#three params
+avg_a = vector(length = numsubs)
+avg_b = vector(length = numsubs)
+avg_m = vector(length = numsubs)
+avg_r = vector(length = numsubs)
+avg_bic = vector(length = numsubs)
+diff2_a = vector(length = numsubs)
+diff2_b = vector(length = numsubs)
+diff2_m = vector(length = numsubs)
+diff2_r = vector(length = numsubs)
+diff2_bic = vector(length = numsubs)
+
+#four params
+full_a = vector(length = numsubs)
+full_b = vector(length = numsubs)
+full_c = vector(length = numsubs)
+full_m = vector(length = numsubs)
+full_r = vector(length = numsubs)
+full_bic = vector(length = numsubs)
+
+
+for(s in unique(test$sub)){
+  dat.s = subset(test, sub ==s)
+  res = optim(c(0.5, 0.5), mdFitts, df = dat.s, method = "L-BFGS-B",
+                   lower = c(-1,0), upper = c(1,1))
+  md_a[s] = res$par[1]
+  md_b[s] = res$par[2]
+  md_r[s] = 1-(res$value/sum((dat.s$mt - mean(dat.s$mt, na.rm= T))^2, na.rm = T))
+  md_bic[s] = log(numtrials)*length(res$par) + numtrials*log(res$value/numtrials)
+  res = optim(c(0.5, 0.5), diffFitts, df = dat.s, method = "L-BFGS-B",
+                   lower = c(-1,0), upper = c(1,1))
+  diff_a[s] = res$par[1]
+  diff_b[s] = res$par[2]
+  diff_r[s] = 1-(res$value/sum((dat.s$mt - mean(dat.s$mt, na.rm= T))^2, na.rm = T))
+  diff_bic[s] = log(numtrials)*length(res$par) + numtrials*log(res$value/numtrials)
+  res = optim(c(0.5, 0.5), vdFitts, df = dat.s, method = "L-BFGS-B",
+                   lower = c(-1,0), upper = c(1,1))
+  vd_a[s] = res$par[1]
+  vd_b[s] = res$par[2]
+  vd_r[s] = 1-(res$value/sum((dat.s$mt - mean(dat.s$mt, na.rm= T))^2, na.rm = T))
+  vd_bic[s] = log(numtrials)*length(res$par) + numtrials*log(res$value/numtrials)
+  
+  res = optim(c(0.5, 0.5, 0.5), avgFitts, df = dat.s, method = "L-BFGS-B",
+                   lower = c(-1,0, 0), upper = c(1,1,1))
+  avg_a[s] = res$par[1]
+  avg_b[s] = res$par[2]
+  avg_m[s] = res$par[3]
+  avg_r[s] = 1-(res$value/sum((dat.s$mt - mean(dat.s$mt, na.rm= T))^2, na.rm = T))
+  avg_bic[s] = log(numtrials)*length(res$par) + numtrials*log(res$value/numtrials)
+  res = optim(c(0.5, 0.5, 0.5), diff2Fitts, df = dat.s, method = "L-BFGS-B",
+                   lower = c(-1,0,0), upper = c(1,1,1))
+  diff2_a[s] = res$par[1]
+  diff2_b[s] = res$par[2]
+  diff2_m[s] = res$par[3]
+  diff2_r[s] = 1-(res$value/sum((dat.s$mt - mean(dat.s$mt, na.rm= T))^2, na.rm = T))
+  diff2_bic[s] = log(numtrials)*length(res$par) + numtrials*log(res$value/numtrials)
+  res = optim(c(0.5, 0.5, 0.5, 0.5), fullFitts, df = dat.s, method = "L-BFGS-B",
+                   lower = c(-1,0,0,0), upper = c(1,1,1,1))
+  full_a[s] = res$par[1]
+  full_b[s] = res$par[2]
+  full_m[s] = res$par[4]
+  full_c[s] = res$par[3]
+  full_r[s] = 1-(res$value/sum((dat.s$mt - mean(dat.s$mt, na.rm= T))^2, na.rm = T))
+  full_bic[s] = log(numtrials)*length(res$par) + numtrials*log(res$value/numtrials)
+}
+```
+
+Plot
+```{r}
+for(s in unique(test$sub)){
+  d = test$extent[test$sub == s]
+  vis = test$vis_dist[test$sub == s]
+  gain = test$vis_dist[test$sub == s]/test$move_dist[test$sub==s]
+  test$md_mt[test$sub == s] = md_a[s] + md_b[s]*log(d)
+  test$vd_mt[test$sub == s] = vd_a[s] + vd_b[s]*log(vis)
+  test$diff_mt[test$sub == s] = diff_a[s] + diff_b[s]*log(d*gain)
+  test$avg_mt[test$sub == s] = avg_a[s] + avg_b[s]*log(avg_m[s]*d + (1-avg_m[s])*vis)
+  test$diff2_mt[test$sub == s] = diff2_a[s] + diff2_b[s]*log(d/(diff2_m[s]/gain + (1-diff2_m[s])))
+}
+
+
+
+type_sub = ddply(test, .(sub, trial_id), summarise,
+                 mt.m = mean(mt, na.rm = T),
+                 md_mt = mean(md_mt, na.rm = T),
+                 vd_mt = mean(vd_mt, na.rm = T),
+                 diff_mt = mean(diff_mt, na.rm = T),
+                 avg_mt = mean(avg_mt, na.rm = T),
+                 diff2_mt = mean(diff2_mt, na.rm = T),
+                 move_dist = mean(move_dist, na.rm = T),
+                 vis_dist = mean(vis_dist, na.rm = T),
+                 md = mean(extent, na.rm = T))
+
+# pseudo-R2s and BICs (on trial type, not individual trials)
+avg_r2 = vector(length = numsubs)
+md_r2 = vector(length = numsubs)
+vd_r2 = vector(length = numsubs)
+diff2_r2 = vector(length = numsubs)
+
+avg_bic2 = vector(length = numsubs)
+md_bic2 = vector(length = numsubs)
+vd_bic2 = vector(length = numsubs)
+diff2_bic2 = vector(length = numsubs)
+for(s in 1:numsubs){
+  mt.s = type_sub$mt.m[type_sub$sub == s]
+  avg_r2[s] = 1-(sum((type_sub$avg_mt[type_sub$sub == s] - mt.s)^2)/sum((mt.s - mean(mt.s))^2))
+  md_r2[s] = 1-(sum((type_sub$md_mt[type_sub$sub == s] - mt.s)^2)/sum((mt.s - mean(mt.s))^2))
+  vd_r2[s] = 1-(sum((type_sub$vd_mt[type_sub$sub == s] - mt.s)^2)/sum((mt.s - mean(mt.s))^2))
+  diff2_r2[s] = 1-(sum((type_sub$diff2_mt[type_sub$sub == s] - mt.s)^2)/sum((mt.s - mean(mt.s))^2))
+  avg_bic2[s] = 3*log(4) + 4*log(sum((type_sub$avg_mt[type_sub$sub == s] - mt.s)^2)/4)
+  md_bic2[s] = 2*log(4) + 4*log(sum((type_sub$md_mt[type_sub$sub == s] - mt.s)^2)/4)
+  vd_bic2[s] = 2*log(4) + 4*log(sum((type_sub$vd_mt[type_sub$sub == s] - mt.s)^2)/4)
+  diff2_bic2[s] = 3*log(4) + 4*log(sum((type_sub$diff2_mt[type_sub$sub == s] - mt.s)^2)/4)
+}
+
+model_fits = data.frame(msi_r2 = avg_r2, msi_bic = avg_bic2, md_r2 = md_r2, md_bic = md_bic2,
+                        vd_r2 = vd_r2, vd_bic = vd_bic2, ew_r2 = diff2_r2, ew_bic = diff2_bic2)
+if(save_figs){
+  write.csv(model_fits, "E1_modelfits.csv")
+}
+
+type_group = ddply(type_sub, .(trial_id, move_dist, vis_dist), summarise,
+                   mt = mean(mt.m, na.rm = T),
+                   mt.se = sd(mt.m, na.rm = T)/sqrt(length(mt.m)),
+                   md_mt = mean(md_mt),
+                   vd_mt = mean(vd_mt),
+                   diff_mt = mean(diff_mt),
+                   avg_mt = mean(avg_mt),
+                   diff2_mt = mean(diff2_mt),
+                   dist = mean(md, na.rm = T),
+                   dist.se = sd(md, na.rm = T)/sqrt(length(mt.m)))
+
+ggplot(type_group, aes(x = dist, y = mt, group = vis_dist, color = vis_dist)) + geom_point(size = 3)+ geom_errorbar(width = 0, size = 2, aes(ymin = mt - mt.se, ymax = mt + mt.se)) + geom_errorbar(width = 0, size = 2, aes(xmin = dist - dist.se, xmax = dist + dist.se)) + geom_point(aes(y = diff_mt, group = move_dist), color = "red", size = 3) + geom_point(aes(y = diff2_mt, group = move_dist), color = "green", size = 3) + geom_point(aes(y = avg_mt, group = move_dist), color = "blue", size = 3)
+```
+
+
