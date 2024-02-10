@@ -116,7 +116,6 @@ type_sub = ddply(test, .(sub, trial_id), summarise,
                  mt.m = mean(mt, na.rm = T),
                  err = mean(ep_dist, na.rm = T),
                  move_dist = mean(move_dist, na.rm = T),
-                 ep_var = sd(ep_angle, na.rm = T),
                  vis_dist = mean(vis_dist, na.rm = T),
                  md = mean(log(extent), na.rm = T))
 

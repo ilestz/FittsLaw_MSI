@@ -168,7 +168,7 @@ block_lc = ddply(sub_lc, .(ti, trial_id), summarise,
                  err_e.se = sd(extent_err, na.rm = T)/sqrt(length(extent_err)))
 
 #last trial of the training blocks
-last_trial = subset(sub_lc, sub_lc$ti == 21)
+last_trial = subset(sub_lc, sub_lc$ti == 20)
 
 ggplot(data = block_lc, aes(x = ti, y = mt.m, group = as.factor(trial_id), color = as.factor(trial_id), fill = as.factor(trial_id))) + geom_point() + geom_ribbon(aes(ymin = mt.m - mt.se, ymax = mt.m+mt.se), alpha = 0.5, color = NA)
 

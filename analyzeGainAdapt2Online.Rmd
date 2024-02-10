@@ -32,14 +32,11 @@ vis_dist = vector(length = numsubs * numtrials)
 move_dist = vector(length = numsubs * numtrials)
 extent = vector(length = numsubs * numtrials)
 
-pids = vector(length = numsubs)
-
 
 df.all = fromJSON(file = "gain-online_e2.json")
 c=1
 for(s in 1:numsubs){
   print(df.all[[s]]$config$user_agent$browser$name)
-  pids[s] = df.all[[s]]$config$id
   for(tt in 1:length(adapt_trials)){
     sub[c] = s
     trial[c] = adapt_trials[tt]
@@ -363,21 +360,4 @@ type_group = ddply(type_sub, .(trial_id, move_dist, vis_dist), summarise,
 
 ggplot(type_group, aes(x = dist, y = mt, group = vis_dist, color = vis_dist)) + geom_point(size = 3)+ geom_errorbar(width = 0, size = 2, aes(ymin = mt - mt.se, ymax = mt + mt.se)) + geom_errorbar(width = 0, size = 2, aes(xmin = dist - dist.se, xmax = dist + dist.se)) + geom_point(aes(y = md_mt, group = move_dist), color = "red", size = 3) + geom_point(aes(y = avg_mt, group = move_dist), color = "blue", size = 3)
 ```
-```{r}
-demographics = read.csv("e3online_demo.csv")
-#demo2 = read.csv("e2online_demo2.csv")
-#demographics = rbind(demographics, demo2)
-name_in_list = function(names, ids){ #funny that i did this as a function; its not like anyone could use this
-  rows = vector(length = length(names))
-  for(r in 1:length(rows)){
-    found = FALSE
-    for(p in 1:length(ids)){
-      found = found | startsWith(names[r], ids[p])
-    }
-    rows[r] = found
-  }
-  return(rows)
-}
-demographics = subset(demographics, name_in_list(demographics$Participant.id, pids))
-write.csv(demographics, "e4Bonline_included.csv")
-```
+

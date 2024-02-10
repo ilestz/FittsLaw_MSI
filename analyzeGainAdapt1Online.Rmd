@@ -157,7 +157,6 @@ for(s in unique(test$sub)){
 type_sub = ddply(test, .(sub, trial_id), summarise,
                  mt.m = mean(mt, na.rm = T),
                  err = mean(ep_dist, na.rm = T),
-                 ep_var = sd(ep_angle, na.rm = T),
                  move_dist = mean(move_dist, na.rm = T),
                  vis_dist = mean(vis_dist, na.rm = T),
                  md = mean(log(extent), na.rm = T))
@@ -166,16 +165,12 @@ type_group = ddply(type_sub, .(trial_id, move_dist, vis_dist), summarise,
                    mt = mean(mt.m, na.rm = T),
                    mt.se = sd(mt.m, na.rm = T)/sqrt(length(mt.m)),
                    dist = mean(md, na.rm = T),
-                   dist.se = sd(md, na.rm = T)/sqrt(length(mt.m)),
-                   ve = mean(ep_var, na.rm = T),
-                   ve.se = sd(ep_var, na.rm = T)/sqrt(length(mt.m)))
+                   dist.se = sd(md, na.rm = T)/sqrt(length(mt.m)))
 
 ggplot(type_group, aes(x = vis_dist, y = mt, group = move_dist, color = move_dist)) + geom_point(size = 3) + geom_errorbar(width = 0, size = 2, aes(ymin = mt - mt.se, ymax = mt + mt.se))
 
 
 ggplot(type_group, aes(x = dist, y = mt, group = vis_dist, color = vis_dist)) + geom_point(size = 3)+ geom_errorbar(width = 0, size = 2, aes(ymin = mt - mt.se, ymax = mt + mt.se)) + geom_errorbar(width = 0, size = 2, aes(xmin = dist - dist.se, xmax = dist + dist.se))
-
-ggplot(type_group, aes(x = dist, y = ve, group = vis_dist, color = vis_dist)) + geom_point(size = 3)+ geom_errorbar(width = 0, size = 2, aes(ymin = ve - ve.se, ymax = ve + ve.se)) + geom_errorbar(width = 0, size = 2, aes(xmin = dist - dist.se, xmax = dist + dist.se))
 
 ggplot(type_group, aes(x = vis_dist, y = dist, group = move_dist, color = move_dist)) + geom_point(size = 3)+ geom_errorbar(width = 0, size = 2, aes(ymin = dist - dist.se, ymax = dist + dist.se))
 
@@ -186,9 +181,6 @@ ggplot(type_group, aes(x = move_dist, y = dist, group = vis_dist, color = vis_di
 mt_fit = lmer(mt.m ~ md + vis_dist + (1|sub), data = type_sub)
 summary(mt_fit)
 anova(mt_fit)
-
-ve_fit = lmer(ep_var ~ md + vis_dist + (1|sub), data = type_sub)
-anova(ve_fit)
 
 if(save_figs){
   write.csv(type_sub, "E2_MTs.csv")
